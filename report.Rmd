@@ -1,0 +1,616 @@
+---
+title: "NYC Property Sales"
+author: "Mark Webster"
+date: "29 January 2019"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(cache = TRUE)
+
+```
+
+# Introduction
+## Data Description
+```{r load_data}
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(fs)
+
+# read raw data from csv file
+raw <- read_csv(path(getwd(),'data/nyc-rolling-sales.csv'))
+
+# sales will be used to clean and manipulate data
+sales <- raw
+
+# number of rows in raw data
+#nrow(sales)
+
+```
+For my "Choose your own" project, I looked at sales data for properties in New York at this link: https://www.kaggle.com/new-york-city/nyc-property-sales
+
+This data covered roperties sold in New York City over a 12-month period from September 2016 to September 2017.
+
+The fields are as follows:
+
+- BOROUGH: number from 1-4 indicating which borough the property is located at
+- NEIGHBORHOOD: text - names of the neighbourhood the property is located at
+- BUILDING CLASS CATEGORY: text - type of property (eg condo, single family residence, office building)
+- TAX CLASS AT PRESENT: text - NYC tax category - differentiates between residential/other, and number of living spaces
+- BLOCK: number - block number property is located at. Does not seem to be unique
+- LOT: number - lot within the block. In most cases, the combination of block and lot is unique but not alwas (eg in the case of Condos)
+- EASE-MENT: NA for all rows
+- BUILDING CLASS AT PRESENT: as above, but for present day. NA in some cases
+- ADDRESS: text - address. Includes apartment number at the end (in format ", 1A" for apartment 1A), but not always
+- APARTMENT NUMBER: text - apartment number - not alwasy complete for apartments. 
+- ZIP CODE: number - zip code. Zero in some cases. Too granular for use in analysis - neighbourhood seems more useful
+- RESIDENTIAL UNITS: number - how many residential units on the site. Note that this relates to the address as a whole, not the individual property sold (eg if a unit)
+- COMMERCIAL UNITS: number - how many commercial units on the site
+- TOTAL UNITS: number - usually equals RESIDENTIAL UNITS + COMMERCIAL UNITS
+- LAND SQUARE FEET: text - how much land in the site. Note that this relates to the address as a whole, not the individual property sold (eg if a unit)
+- GROSS SQUARE FEET: text - floor area of buildings on the site
+- YEAR BUILT: number - year  building was constructed
+- TAX CLASS AT TIME OF SALE: NYC tax code - at time of sale
+- BUILDING CLASS AT TIME OF SALE: NYC buliding class - more useful than "BUILDING CLASS AT PRESENT" as there are no NA values
+- SALE PRICE: text - how much the property was sold for
+- SALE DATE: date - when the property was sold
+
+The data has 84548 rows. It is very difficiult to interpret as often key fields are NA or zero - for instance LAND SQUARE FEET and  GROSS SQUARE FEET. It became clear that values such as these apply to the address as a whole - and not the apartment sold. For condos, the area columns are usually zero, giving us very little to go on apart from the location of the condo in terms of creating a model.
+
+The data also has duplicate rows.
+
+
+## Task
+The task is to create a model to predict sale price, given the data provided above.
+
+I chose percentage error as measure when looking at the effectiveness of the model - ie the difference between the predicted and acual sale price, divided by the actual sale price. To get an overall estimate, I took the squares of the percentage errors, then the square root of the means of these errors.
+
+# Methods/Analysis
+
+## Cleaning Data
+
+### Rename Columns and Delete Irrelevant Ones
+The raw data has all caps column names, with spaces in between words which makes them hard to use. There are also a few columns which have no values (such as EASE-MENT), and these were dropped. I selected the relevant cols and turn col names to lowecase, with no spaces
+
+### Convert Columns to Numeric
+The key columns of 'land_area','gross_area' and 'sale_price' were in text format - I converted these to numeric and any NA values assigned a value of 0.
+
+Some rows had 0 for the sale price - these rows were removed.
+
+### Remove Duplicate Rows
+Duplicate rows - ie with the same sale price, address, sale date etc - were removed.
+
+### Incorporate Information on Building Class Codes and Segment into Datasets
+Next, I found some information on building class codes from the NYC website: https://www1.nyc.gov/assets/finance/jump/hlpbldgcode.html
+
+I converted the building class code details to a csv file and examined them. It was clear that some codes were of a very different nature to the rest of the data (eg CM	MOBILE HOMES/TRAILER PARKS, Q2	PLAYGROUND). I created a "dataset" column in the csv file and classified these types of codes as "other". 
+
+Given the differences in data availability and pricing, I created the following categories in the dataset column:
+
+- Condos - seem to be individual units, no land or gross area details
+- Family Homes - houses with single or multiple families, generally have land and gross area details
+- Rentals  - seem to be largely whole buildings of rental apartments, generally have land and gross area details
+- Commercial - industrial/warehouse/retail, generally have land and gross area details
+- Offices - office buildings, generally have land and gross area details
+- Vacant Land - land but no gross area details
+- Other - parks, parking, and unclassified
+
+You can see the differences in the dataset types by looking at the table below - many categories have no land or gross area information, others have 100% area information, with only a few categories which sometimes have area data and sometimes not:
+
+```{r clean_data}
+
+# raw data has all caps column names, with spaces in between words - hard to use
+# select relevant cols and turn col names to lowecase, with no spaces
+sales <- sales %>% 
+  select(borough = `BOROUGH`,
+         neighbourhood = `NEIGHBORHOOD`,
+         address = ADDRESS,
+         apartment_number = `APARTMENT NUMBER`,
+         block = BLOCK,
+         lot = LOT,
+         zip_code = `ZIP CODE`,
+         units_res = `RESIDENTIAL UNITS`,
+         units_comm = `COMMERCIAL UNITS`,
+         units_total = `TOTAL UNITS`,
+         land_area = `LAND SQUARE FEET`,
+         gross_area = `GROSS SQUARE FEET`,
+         year_built = `YEAR BUILT`,
+         tax_class = `TAX CLASS AT TIME OF SALE`,
+         bldg_category = `BUILDING CLASS CATEGORY`,
+         building_class = `BUILDING CLASS AT TIME OF SALE`,
+         sale_price = `SALE PRICE`,
+         sale_date = `SALE DATE`
+  ) 
+
+# convert the following columns into numerics
+numerics = c('land_area','gross_area','sale_price')
+for(x in numerics){
+  sales[[x]] <- as.numeric(sales[[x]])
+  sales[[x]][is.na(sales[[x]])] <-0
+}
+
+
+
+# sale prices need to not be NA or zero
+sales <- sales %>% 
+  filter(`sale_price` > 0) 
+#nrow(sales)
+
+# get rid of duplicate rows - where all the following are the same: address,block,lot,land_area,gross_area,sale_date,sale_price
+duplicate <- sales %>% select(address,block,lot,land_area,gross_area,sale_date,sale_price) %>% duplicated()
+#sum(duplicate)
+sales <- sales %>% mutate(duplicate = ifelse(duplicate,1,0))
+sales <- sales %>% filter(duplicate==0) 
+#nrow(sales)
+
+# get rid of rows which are the same, but one doesn't have area details
+duplicate <- sales %>% select(address,block,lot,sale_date,sale_price) %>% duplicated()
+
+sales <- sales %>% mutate(duplicate = ifelse(duplicate & land_area==0 & gross_area==0,1,0))
+# how many duplicate rows
+#sum(sales$duplicate)
+# filter out duplicates
+sales <- sales %>% filter(duplicate==0) 
+#nrow(sales)
+
+# import descriptions of building classes from NYC website
+building_classes <- read_csv(path(getwd(),'data/building_classes.csv'))
+
+# left join building classes to sales database
+sales <- sales %>% 
+  left_join(building_classes, by='building_class') 
+
+dataset_order <- sales %>%
+  group_by(dataset) %>%
+  summarize(avg = mean(sale_price)) %>%
+  arrange(avg) %>%
+  .$dataset
+
+sales$dataset <- factor(sales$dataset,dataset_order)
+
+# let's look at a summary by building class
+# notice that there are a large proportion of entries which have zero land_area or gross_area 
+# particularly for condos
+# most other property classes have land/gross areas set
+# these apply building by building not individual units
+bldg_class_summ <- sales %>% 
+  mutate(building_class = paste(building_class,tolower(building_class_descr))) %>%
+  mutate(`Building Class` = strtrim(building_class,32)) %>%
+  group_by(`Building Class`) %>% 
+  summarize(
+            dataset=first(dataset),
+            n=n(),
+            land_area_zero = mean(land_area==0),
+            gross_area_zero=mean(gross_area==0),
+            avg_sale_price=mean(sale_price)) %>%
+  arrange(`Building Class`)
+
+knitr::kable(bldg_class_summ)
+```
+
+
+### Moving Records Between Datasets
+Looking at the above table, we can see that for some condos, we have land and gross area - these were moved to the Rentals dataset.
+
+For some Rentals, we have no land or gross area - these were moved to the Condos dataset.
+
+I also checked for situations were Commercial or Family Home records had no gross area - these would most likley be vacant lots (as there is no building onsite) so they were moved to the Vacant Land dataset.
+
+### Property Value Outliers
+Examining the data, there were a lot of transactions for very low amounts - 0, USD 1, or USD 10. These are clearly transfers for no real consideration (eg gifts to family members) and hence not reflective of the commercial rate. It is hard to imagine buying any property in NYC for less than USD 50,000, so any rows with sale prices under this amount were excluded.
+
+Next, the range of values is very large on the high end - with some properties valued at billions of dollars. Any property sold for over USD 10B was excluded.
+
+```{r move_records}
+
+# condos don't need area details other types do...
+# If a rental doesn't have area details, move to Condos
+sales$dataset[sales$dataset == 'Rentals' & sales$land_area==0 & sales$gross_area==0] <- "Condos"
+
+# Unless a condo, need area details - delete rows without any area information
+sales <- sales %>% 
+  filter(dataset == 'Condos' | land_area!=0 & gross_area!=0)
+#nrow(sales)
+
+# if no gsf, then the block is vacant
+zero_gsf = sales$dataset %in% c('Commercial','Family Homes','Office','Rentals') & sales$gross_area==0
+#sum(zero_gsf)
+
+sales %>% ggplot(aes(dataset,sale_price)) +
+  geom_boxplot() + 
+  scale_y_log10()
+
+# get rid of any properties sold for under $50,000 - such transactions seem not to be at a commercial rate, but "peppercorn" consideration
+sales <- sales %>% 
+  filter(`sale_price` > 50000) 
+#nrow(sales)
+
+# get rid of any properties sold for over $10B - these tend to be outliers
+sales <- sales %>% 
+  filter(`sale_price` < 1e11) 
+#nrow(sales)
+
+
+```
+
+### Adding a Sale Month and Sale Week Column
+New columns were created to reflect the sale month and sale week by rounding the sale date column. This was to see if there was a trend in property values over the year. 
+
+Looking at the average sale price per month for the Condos dataset, it looks like there is some month-to-month trend we could allow for in modelling.
+
+```{r timeseries}
+
+# group by sale month & week
+sales <- sales %>% 
+  mutate(sale_month = round_date(sale_date,'month'),
+         sale_week = round_date(sale_date,'week'))
+
+sales %>% 
+  filter(dataset=="Condos") %>%
+  group_by(sale_month) %>%
+  summarize(avg=mean(sale_price)) %>%
+  ggplot(aes(sale_month,avg)) +
+  geom_line() + 
+  scale_y_log10()
+
+```
+
+### Overall Trend by Dataset
+Looking at the overall trend, we can see that most of the properties are Condos or Family Homes, with reasonable numbers in the Rentals and Commercial datasets. There are only small numbers in the Office, Vacant Land and Other datasets, so I did not attempt to fit these datasets.
+
+```{r overall_trends}
+# perc_error - function to calculate mean square % error
+# seems to be an appropriate metric for fitting models
+perc_error <- function(true_ratings, predicted_ratings){
+  adj_ratings <- ifelse(true_ratings==0,1,true_ratings)
+  sqrt(mean(((true_ratings-predicted_ratings)/adj_ratings)^2))
+}
+
+# RMSE - function to calculate mean square error
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings-predicted_ratings)^2))
+}
+
+# let's look at some summary data by category
+dataset_summary <- sales %>% group_by(dataset) %>% summarize(count=n(),avg=mean(sale_price),max=max(sale_price),min=min(sale_price),sd=sd(sale_price)) %>%
+  arrange(desc(count))
+knitr::kable(dataset_summary)
+```
+
+There is a large variation in average sale values and standard deviation by dataset, hence each dataset will be fitted separately. 
+
+# Method
+The data were segmented by dataset and models fitted for the most common categories - Condos, Family Homes, Rentals and Commercial.
+
+I decided to try two different models in fitting the data.
+
+## Method 1 - Iterative Means
+This method is a generalisation of the method used in the MovieLens project. I wanted to see if this method gave better results or ran more quickly than other regression methods.
+
+The data has a number of different columns where the average price can be calculated for each column value. In particular these columns:
+
+- neighbourhood
+- units_res
+- units_comm
+- units_total
+- year_built
+- building_class
+- bldg_category
+- sale_month
+- gross_area_category
+- land_area_category
+  
+For example, an average sale price can be calculated for each neighbourhood in the neighbourhood column (similar to calculating an average rating for each user based on the userID column in Movielens).
+
+Bins were used to separate gross area and land area into categories. A log scale was used to set the ranges for each bin given the large variation in areas.
+
+One thing which was not clear to me in the MovieLens project was why we calculated the movie effect first, then calculated the user effect based on the residual. For this project, I wanted to create an algorithm to choose columns in an optimal order when calculating column effects.
+
+The process was then as follows:
+
+1. Calculate the overall mean sale price, and subtract this from the train_data sale price to create a residual
+2. Create a list of columns we want to calculate effects for (column list)
+2. Calculate the overall mean residuals by column value for each column remaining in the column list
+- Y_hat is the mean residual for the column value
+- Calculate the RMSE when comparing Y_hat to the actual residual value
+5. Select the column x which gives the lowest RMSE 
+6. Save x into a ordered priority list of column effects, and the mean residuals by value of column x (analogous to a 'movies' table in MovieLens - the mean residual for each movie)
+7. Delete x from the list of columns we want to calculate effects for
+8. Update the residuals by subtracting the Y_hat for the column x
+8. Return to item 2, and continue until we have generated a full priority list of column effects
+
+Because we have saved the list of columns in order of importance, and the mean residuals by column, we can then apply the model which has been generated. This is analogous to the Movielens process except:
+
+- We can potentially handle any number of columns; and
+- We figure out which columns should be used first in calculating column effects
+
+Here is some sample output for the "Family Homes" dataset:
+
+```{r iterative means}
+
+
+# this function generalises the method used in the movielens project
+fit_data_iterative_means <- function(category,verbose=FALSE){
+  # sales_mod - select only the data from the requried category
+  sales_mod <- sales %>% filter(dataset == category)
+  
+  # create bins for area predictors
+  # condos don't have area data
+  if(category != "Condos"){
+    # area predictors are gross_area and land_area
+    area_types <- c('gross_area','land_area')
+    for (x in area_types){
+      
+      # if(verbose){
+      #   # plot the distribution of areas 
+      #   p <- sales_mod %>%
+      #     ggplot(aes(gross_area,sale_price)) +
+      #     geom_point() +
+      #     scale_x_log10()+
+      #     scale_y_log10()
+      #   print(p)
+      # }
+
+      # use log scale for areas
+      # max/min of the range in log terms - add 1 to avoid taking a log of zero
+      area_max <- ceiling(log10(max(1+sales_mod[[x]])))
+      area_min <- floor(log10(min(1+sales_mod[[x]])))
+      # create 50 bins - calculate stepsize
+      area_stepsize <- (area_max - area_min)/50
+      # create category_gross_area or category_land_area
+      sales_mod[[paste(x,"category",sep="_")]] = ceiling((log10(sales_mod[[x]]) - area_min)/area_stepsize)
+    }
+
+  } else {
+    # handle condos which don't have area information
+    sales_mod <- sales_mod %>% mutate(gross_area_category = 1,land_area_category = 1)
+  }
+  
+  # use logs of sales prices
+  # save the sale_price down as sale_price_orig
+  sales_mod$sale_price_orig <- sales_mod$sale_price
+  # set sale_price to be log10 of original sale price
+  sales_mod$sale_price <- log10(sales_mod$sale_price)
+  
+  # create test and train data
+  set.seed(11)
+  test_index <- createDataPartition(y = sales_mod$sale_price, times = 1, p = 0.2, list = FALSE)
+  train_set <- sales_mod[-test_index,]
+  test_set <- sales_mod[test_index,]
+  
+  # generate means by category
+  category_means <- function(x){
+    #for debugging:
+    #browser()
+    #print(x)
+    # check the x argument is a valid category name
+    if(!is.character(x) | str_length(x) == 0){
+      return(data.frame(x="", avg=1e8))
+    } 
+    # calculate the mean of the residual by each category value
+    temp <- residuals %>% 
+      filter(!is.na(residuals[[x]])) %>% 
+      group_by(residuals[[x]]) %>% 
+      summarize(avg = mean(residual))
+    # make more useful column names 
+    colnames(temp) <- c(x,'avg')
+    # return temp
+    temp
+  }
+  
+  # estimate residual based on the mean by category value
+  category_fit <- function(x,means,data){
+    # subsitute means calculated by the category_means function
+    pred <- data %>% left_join(means, by=x) %>% 
+      mutate(pred = avg) %>%
+      .$pred
+    # don't want N/A values - set to zero
+    pred[is.na(pred)] <- 0
+    pred
+  }
+  
+  # find RMSE of data fitted to category
+  category_rmse <- function(x){
+    category_means <- category_means(x)
+    RMSE(residuals$residual,category_fit(x,category_means,residuals))
+  }
+  
+  # make predictions based on the model
+  apply_model <- function(category_order,means,data,verbose=FALSE){
+    # pred is a vector with our predictions (Y_hat)
+    pred <- rep(mu,nrow(data))
+    # what's the RMSE if we use the overall mean - report on this if verbose==TRUE
+    rmse <- RMSE(data$sale_price,pred)
+    if(verbose) print(paste("Overall Mean: RMSE = ",rmse))
+    # go through each category in order of importance
+    for(i in seq(1:length(category_order))){
+      # add the category_fit - ie mean by category value
+      pred <- pred + category_fit(category_order[i],means[[i]],data)
+      # what's the percentage error - report on this if verbose==TRUE
+      rmse <- RMSE(data$sale_price,pred)
+      if(verbose) print(paste(category_order[i],": RMSE = ",rmse))
+    }
+    # return predicted values
+    pred
+  }
+  
+  # get a report on the biggest misses by abs(percentage error)
+  max_delta <- function(){
+    max_delta <- data %>% mutate(delta = sale_price - pred) %>% arrange(desc(abs(delta))) %>% slice(1:20)
+    print(max_delta)
+  }
+  
+  # mu is the overall average sale price
+  mu <- mean(train_set$sale_price)
+  
+  # residuals holds the categories we are looking at and the residual so far
+  residuals <- train_set %>%
+    mutate(residual = sale_price - mu) %>%
+    select(neighbourhood,units_res,units_comm, units_total,year_built,building_class,bldg_category,sale_month, gross_area_category, land_area_category,residual) 
+  
+  # categories we will look at in making predictions
+  categories <- names(residuals)
+  # chop off the residual column
+  categories <- categories[1:(length(categories)-1)]
+  # means holds the average by category value in dataframe format - hence a list
+  means <- vector("list",length(categories))
+  # category order is the order of importance for each category
+  category_order <- rep("",length(categories))
+  i <- 0
+  last_min <- 1e8
+  while(i < length(category_order)){
+    i <- i + 1
+    # calculate percentage errors
+    rmses <- unlist(lapply(categories,category_rmse))
+    #browser()
+    #print(rmses)
+    #print(categories[which.min(rmses)])
+    # print(is.infinite(min(rmses)))
+    
+    if(is.infinite(min(rmses))){
+    #if(last_min < min(rmses)){
+        
+      means <- means[1:i-1]
+      category_order <- category_order[1:i-1]
+      i <- length(category_order) + 1
+    } else {
+      last_min <- min(rmses)
+      # which category results in the smallest % error
+      x <- categories[which.min(rmses)]
+      # x is the next most important category - save this into category_order
+      category_order[i] <- x
+      # calculate the means by category value, save it into our means list
+      means[[i]] <- category_means(x)
+      # subtract off the category means from residuals
+      pred <- category_fit(x,category_means(x),residuals)
+      residuals$residual <- residuals$residual - pred
+      # remove x from the remaining categories to be prioritised
+      categories <- categories[which(categories != x)]
+    }
+
+  }
+  
+  # if(verbose){
+  #   print("Most important columns in order:")
+  #   print(category_order) 
+  # }
+  
+  # this is applying the model to the train data
+  # pred <- apply_model(category_order,means,train_set)
+  # pred <- 10^pred
+  # delta <- train_set %>% mutate(delta = sale_price_orig - pred) %>% arrange(desc(abs(delta)))
+  # perc_error(pred,train_set$sale_price_orig)
+  
+  # apply the model to the test data
+  pred <- apply_model(category_order,means,test_set,verbose)
+  # revers taking log10 for predicted values
+  pred <- 10^pred
+  # calculate largest errors
+  delta <- test_set %>% mutate(delta = sale_price_orig - pred) %>% arrange(desc(abs(delta)))
+  # return percentage error
+  if(verbose){
+    print(paste("Percentage Error:",perc_error(pred,test_set$sale_price_orig)))
+
+  }
+  perc_error(pred,test_set$sale_price_orig)
+  
+}
+
+fit_data_iterative_means("Family Homes",TRUE)
+
+```
+
+The above printout applies the model trained on the training set, applied to the test set with RMSE effects when each column is added.
+
+You can see that the neighbourhood, gross_area, land_area and year_built have the most significant column effects. 
+
+After the bulding_class column, there is very little benefit from adding additional column effects.
+
+## Method 2 - Binary Colums and LM
+Because we have category columns (eg neighbourhood), it is difficult to perform traditional linear regression for this problem.
+
+Accordingly, I created binary columns for key columns - in particular neighbourhood and property_class. This created one column for each value (eg for each neighbourhood), with a 1 if the property matched the value (ie was in the neighbourhood), and 0 otherwise.
+
+I was able to use the other colums which had numerical data as is - particularly land_area, gross_area, year_built.
+
+I then used LM to fit a model. KNN and RandomForest were also tried, but these did not work due to the size of the dataset.
+
+# Results
+Below are the summarised percentage error results for both methods:
+
+```{r results}
+
+# this function fits the data using various models - eg "lm", "knn" etc
+fit_data <- function(category,model){
+  # sales_mod - limit data to the specific category
+  sales_mod <- sales %>% filter(dataset==category)
+  
+  # turn the following columns into binary ones
+  factor_cols <- c('neighbourhood','bldg_category')
+  
+  # start with the following predictors
+  X <- sales_mod %>% select(land_area,gross_area,year_built)
+  
+  for(x in factor_cols){
+    # get the names of the possible values of the category
+    category_names <- sort(unique(sales_mod[[x]]))
+    # create a column for each possible value
+    for(y in category_names){
+      # 1 if the value matches, 0 otherwise
+      X[[(paste(x,y,sep="_"))]] = (sales_mod[[x]] == y)
+    }
+  }
+  
+  
+  # add the sales price as the Y to be predicted
+  X$Y <- sales_mod$sale_price
+  
+  # check that all columns have been added
+  names(X)
+  
+  # partition into Test and Train Data
+  set.seed(11)
+  test_index <- createDataPartition(y = X$Y, times = 1, p = 0.2, list = FALSE)
+  train_set <- as(slice(X,-test_index),"matrix")
+  test_set <- as(slice(X,test_index),"matrix")
+  
+  nrow(train_set)
+  rowlength <- ncol(test_set)    
+
+  # fit the training data to the required model
+  fit <- train(Y ~ ., method = model, data = train_set)
+  
+  # calculate the Y_hat values for the test set
+  Y_hat <- predict(fit,test_set)
+  # return percentage error of predicted values compared to the actual values of the test set 
+  perc_error(Y_hat,test_set[,rowlength])
+}
+
+# iterate through each dataset
+datasets = c("Family Homes","Condos","Rentals","Commercial")
+for(ds in datasets){
+  # fit using LM
+  lm <- fit_data(ds,"lm")
+  print(paste(ds," lm fit :", lm))
+  # fit using iterative means
+  iterative_means <- fit_data_iterative_means(ds)
+  print(paste(ds," iterative means fit :", iterative_means))
+}
+```
+
+The Iterative Means method was considerably faster than Method 2 using LM.
+
+# Conclusions
+The Iterative Means method seems like a useful approach - for instance:
+
+- It allows you to quickly figure out which columns are the most significant
+- Accuracy is better in many cases than using Method 2 and LM
+- It runs a lot faster than Method 2
+
